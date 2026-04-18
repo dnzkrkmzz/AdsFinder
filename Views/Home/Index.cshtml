@@ -1,0 +1,29 @@
+﻿<div class="container mt-5">
+    <div class="card shadow p-4">
+        <h3 class="text-center mb-4">Ads.txt Partner Kontrolü</h3>
+        
+        <form asp-action="CheckAds" method="post" enctype="multipart/form-data">
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <label class="form-label">Web Sitesi Listesi (.txt)</label>
+                    <input type="file" name="file" class="form-control" accept=".txt" required />
+                </div>
+                
+                <div class="col-md-4">
+                    <label class="form-label">Aranacak Partner</label>
+                    <select name="selectedPartner" class="form-select" required>
+                        <option value="">Seçiniz...</option>
+                        <option value="admatic.com.tr">admatic.com.tr</option>
+                        <option value="admatic.de">admatic.de</option>
+                        <option value="adtarget.com.tr">adtarget.com.tr</option>
+                        <option value="pixad.com.tr">pixad.com.tr</option>
+                    </select>
+                </div>
+                
+                <div class="col-md-2 d-flex align-items-end">
+                    <button type="submit" class="btn btn-primary w-100">Sorgula</button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>

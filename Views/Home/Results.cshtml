@@ -1,0 +1,38 @@
+@using System.Text.Json
+@model List<AdsFinder.Models.CheckResult>
+
+<div class="container mt-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h3>Sorgu Sonucu: <span class="text-primary">@ViewBag.SelectedPartner</span></h3>
+        
+        <form asp-action="ExportToExcel" method="post">
+            <input type="hidden" name="partner" value="@ViewBag.SelectedPartner" />
+            <input type="hidden" name="resultsJson" value="@JsonSerializer.Serialize(Model)" />
+            <button type="submit" class="btn btn-success">
+                <i class="bi bi-file-earmark-excel"></i> Excel Olarak İndir
+            </button>
+        </form>
+    </div>
+
+    <div class="table-responsive">
+        <table class="table table-bordered table-striped mt-3">
+            <thead class="table-dark">
+                <tr>
+                    <th>Domain</th>
+                    <th>Durum</th>
+                    <th>Açıklama</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var item in Model.Where(x => !x.HasAdsTxt)) // ads.txt olmayanlar listelenir. Hepsi için Model.Where(x => !x.HasAdsTxt) bunun yerine Model yaz.
+                {
+                    <tr class="@(item.HasAdsTxt ? "table-success" : "table-danger")">
+                        <td>@item.Domain</td>
+                        <td>@(item.HasAdsTxt ? "VAR" : "YOK")</td>
+                        <td>@item.StatusMessage</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+</div>
