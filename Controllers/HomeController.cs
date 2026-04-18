@@ -1,111 +1,184 @@
 using Microsoft.AspNetCore.Mvc;
 using AdsFinder.Models;
-using System.Net.Http;
+using System.Diagnostics;
+using Microsoft.EntityFrameworkCore;
 using ClosedXML.Excel;
 
-public class HomeController : Controller
+namespace AdsFinder.Controllers
 {
-    private readonly IHttpClientFactory _httpClientFactory;
-
-    public HomeController(IHttpClientFactory httpClientFactory)
+    public class HomeController : Controller
     {
-        _httpClientFactory = httpClientFactory;
-    }
+        private readonly ILogger<HomeController> _logger;
+        private readonly IHttpClientFactory _httpClientFactory;
+        private readonly AppDbContext _context;
 
-    [HttpGet]
-    public IActionResult Index() => View();
-
-    [HttpPost]
-    public async Task<IActionResult> CheckAds(IFormFile file, string selectedPartner)
-    {
-        var results = new List<CheckResult>();
-        if (file == null || string.IsNullOrEmpty(selectedPartner)) return RedirectToAction("Index");
-
-        using (var reader = new StreamReader(file.OpenReadStream()))
+        public HomeController(ILogger<HomeController> logger, IHttpClientFactory httpClientFactory, AppDbContext context)
         {
-            var client = _httpClientFactory.CreateClient();
-            client.Timeout = TimeSpan.FromSeconds(8);
+            _logger = logger;
+            _httpClientFactory = httpClientFactory;
+            _context = context;
+        }
 
-            while (!reader.EndOfStream)
+        public IActionResult Index()
+        {
+            return View();
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> StartScan(IFormFile file, string selectedPartner)
+        {
+            if (file == null || string.IsNullOrEmpty(selectedPartner))
             {
-                var line = await reader.ReadLineAsync();
-                var domain = line?.Trim();
-                if (string.IsNullOrWhiteSpace(domain)) continue;
+                return RedirectToAction("Index");
+            }
 
-                var url = domain.StartsWith("http") ? domain : $"https://{domain}";
-                var adsTxtUrl = $"{url.TrimEnd('/')}/ads.txt";
+            // 1. Yeni tarama için eski verileri temizle
+            var allOldRecords = _context.CheckResults.ToList();
+            _context.CheckResults.RemoveRange(allOldRecords);
+            await _context.SaveChangesAsync();
+
+            // 2. Dosyayı oku ve veritabanına "Bekliyor" olarak kaydet
+            using (var reader = new StreamReader(file.OpenReadStream()))
+            {
+                while (!reader.EndOfStream)
+                {
+                    var line = await reader.ReadLineAsync();
+                    var domain = line?.Trim();
+
+                    if (!string.IsNullOrWhiteSpace(domain))
+                    {
+                        // Alan adının başındaki http/https kısmını temizleyip saf domaini alalım (İsteğe bağlı)
+                        domain = domain.Replace("https://", "").Replace("http://", "").TrimEnd('/');
+
+                        _context.CheckResults.Add(new CheckResult
+                        {
+                            Domain = domain,
+                            SelectedPartner = selectedPartner,
+                            IsProcessed = false,
+                            StatusMessage = "Bekliyor..."
+                        });
+                    }
+                }
+            }
+            await _context.SaveChangesAsync();
+
+            // 3. Toplam sayıyı View'a gönder ve Results sayfasını aç
+            ViewBag.TotalSites = await _context.CheckResults.CountAsync();
+            return View("Results");
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> ProcessBatch()
+        {
+            // 10 yerine 100'erli paketler halinde alıyoruz
+            var pendingSites = await _context.CheckResults
+                .Where(x => !x.IsProcessed)
+                .Take(100)
+                .ToListAsync();
+
+            if (!pendingSites.Any())
+            {
+                return Json(new { finished = true });
+            }
+
+            var client = _httpClientFactory.CreateClient();
+            client.Timeout = TimeSpan.FromSeconds(8); 
+
+            // 100 siteyi Render'ı şişirmeden, 20'şerli koldan aynı anda tarıyoruz (Hız aşırtma)
+            await Parallel.ForEachAsync(pendingSites, new ParallelOptions { MaxDegreeOfParallelism = 20 }, async (item, ct) =>
+            {
+                var url = $"https://{item.Domain}/ads.txt";
 
                 try
                 {
-                    var response = await client.GetAsync(adsTxtUrl);
+                    var response = await client.GetAsync(url, ct);
+                    
                     if (response.IsSuccessStatusCode)
                     {
-                        var content = await response.Content.ReadAsStringAsync();
+                        var content = await response.Content.ReadAsStringAsync(ct);
                         
-                        // Seçilen partner (örn: admatic.com.tr) içeriğin içinde var mı?
-                        if (content.Contains(selectedPartner, StringComparison.OrdinalIgnoreCase))
+                        if (content.Contains(item.SelectedPartner ?? "", StringComparison.OrdinalIgnoreCase))
                         {
-                            results.Add(new CheckResult { Domain = domain, HasAdsTxt = true, StatusMessage = "Partner Bulundu" });
+                            item.HasAdsTxt = true;
+                            item.StatusMessage = "Partner Bulundu ✅";
                         }
                         else
                         {
-                            results.Add(new CheckResult { Domain = domain, HasAdsTxt = false, StatusMessage = "Partner Eksik" });
+                            item.HasAdsTxt = false;
+                            item.StatusMessage = "Partner Eksik ❌";
                         }
                     }
                     else
                     {
-                        results.Add(new CheckResult { Domain = domain, HasAdsTxt = false, StatusMessage = "ads.txt bulunamadı" });
+                        item.HasAdsTxt = false;
+                        item.StatusMessage = $"Hata: {response.StatusCode}";
                     }
                 }
                 catch
                 {
-                    results.Add(new CheckResult { Domain = domain, HasAdsTxt = false, StatusMessage = "Bağlantı Hatası" });
+                    item.HasAdsTxt = false;
+                    item.StatusMessage = "Bağlantı Kurulamadı";
                 }
-            }
+
+                item.IsProcessed = true;
+            });
+
+            await _context.SaveChangesAsync();
+
+            return Json(new { finished = false, results = pendingSites });
         }
 
-        ViewBag.SelectedPartner = selectedPartner;
-        return View("Results", results);
-    }
-
-    [HttpPost]
-    public async Task<IActionResult> ExportToExcel(string partner, string resultsJson)
-    {
-        // Sonuçları JSON'dan geri alıyoruz (veya TempData kullanabilirsiniz)
-        var results = System.Text.Json.JsonSerializer.Deserialize<List<CheckResult>>(resultsJson);
-
-        using (var workbook = new XLWorkbook())
+        [ResponseCache(Duration = 0, Location = ResponseCacheLocation.None, NoStore = true)]
+        public IActionResult Error()
         {
-            var worksheet = workbook.Worksheets.Add("AdsTxt Kontrol");
-            var currentRow = 1;
+            return View(new ErrorViewModel { RequestId = Activity.Current?.Id ?? HttpContext.TraceIdentifier });
+        }
+        [HttpGet]
+        public async Task<IActionResult> ExportToExcel()
+        {
+            // 1. Veritabanındaki tüm sonuçları al
+            var results = await _context.CheckResults.ToListAsync();
 
-            // Başlıklar
-            worksheet.Cell(currentRow, 1).Value = "Domain";
-            worksheet.Cell(currentRow, 2).Value = "Durum";
-            worksheet.Cell(currentRow, 3).Value = "Hata Mesajı";
-            worksheet.Cell(currentRow, 4).Value = "Kontrol Edilen Partner";
-
-            // Stil (Opsiyonel)
-            worksheet.Row(1).Style.Font.Bold = true;
-            worksheet.Row(1).Style.Fill.BackgroundColor = XLColor.LightGray;
-
-            // Veriler
-            foreach (var item in results)
+            if (!results.Any())
             {
-                currentRow++;
-                worksheet.Cell(currentRow, 1).Value = item.Domain;
-                worksheet.Cell(currentRow, 2).Value = item.HasAdsTxt ? "VAR" : "YOK";
-                worksheet.Cell(currentRow, 3).Value = item.StatusMessage;
-                worksheet.Cell(currentRow, 4).Value = partner;
+                return RedirectToAction("Index"); // Veri yoksa ana sayfaya dön
             }
 
-            worksheet.Columns().AdjustToContents();
-
-            using (var stream = new MemoryStream())
+            // 2. Excel dosyasını hafızada oluştur
+            using (var workbook = new XLWorkbook())
             {
-                workbook.SaveAs(stream);
-                var content = stream.ToArray();
-                return File(content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", $"AdsCheck_{partner}.xlsx");
+                var worksheet = workbook.Worksheets.Add("Tarama Sonuçları");
+                var currentRow = 1;
+
+                // Başlıklar
+                worksheet.Cell(currentRow, 1).Value = "Domain";
+                worksheet.Cell(currentRow, 2).Value = "Durum";
+                worksheet.Cell(currentRow, 3).Value = "Aranan Partner";
+
+                // Verileri Doldur
+                foreach (var item in results)
+                {
+                    currentRow++;
+                    worksheet.Cell(currentRow, 1).Value = item.Domain;
+                    worksheet.Cell(currentRow, 2).Value = item.StatusMessage;
+                    worksheet.Cell(currentRow, 3).Value = item.SelectedPartner;
+                }
+
+                // Sütun genişliklerini otomatik ayarla
+                worksheet.Columns().AdjustToContents();
+
+                using (var stream = new MemoryStream())
+                {
+                    workbook.SaveAs(stream);
+                    var content = stream.ToArray();
+
+                    // 3. BOMBA KISIM: Excel oluşturulduktan sonra veritabanını tamamen temizle!
+                    _context.CheckResults.RemoveRange(results);
+                    await _context.SaveChangesAsync();
+
+                    // 4. Excel dosyasını kullanıcıya indir
+                    return File(content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "AdsFinder_Sonuclar.xlsx");
+                }
             }
         }
     }

@@ -1,38 +1,89 @@
-@using System.Text.Json
-@model List<AdsFinder.Models.CheckResult>
+@{
+    ViewData["Title"] = "Tarama Sonuçları";
+}
 
-<div class="container mt-4">
-    <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3>Sorgu Sonucu: <span class="text-primary">@ViewBag.SelectedPartner</span></h3>
-        
-        <form asp-action="ExportToExcel" method="post">
-            <input type="hidden" name="partner" value="@ViewBag.SelectedPartner" />
-            <input type="hidden" name="resultsJson" value="@JsonSerializer.Serialize(Model)" />
-            <button type="submit" class="btn btn-success">
-                <i class="bi bi-file-earmark-excel"></i> Excel Olarak İndir
-            </button>
-        </form>
+<div class="container mt-5">
+    <h2 class="mb-4">Canlı Tarama Durumu</h2>
+    
+    <div class="alert alert-info">
+        <strong>Toplam Yüklenen Site:</strong> <span id="totalCount">@ViewBag.TotalSites</span> <br />
+        <strong>Taranan:</strong> <span id="processedCount">0</span>
     </div>
 
-    <div class="table-responsive">
-        <table class="table table-bordered table-striped mt-3">
-            <thead class="table-dark">
-                <tr>
-                    <th>Domain</th>
-                    <th>Durum</th>
-                    <th>Açıklama</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach (var item in Model.Where(x => !x.HasAdsTxt)) // ads.txt olmayanlar listelenir. Hepsi için Model.Where(x => !x.HasAdsTxt) bunun yerine Model yaz.
-                {
-                    <tr class="@(item.HasAdsTxt ? "table-success" : "table-danger")">
-                        <td>@item.Domain</td>
-                        <td>@(item.HasAdsTxt ? "VAR" : "YOK")</td>
-                        <td>@item.StatusMessage</td>
-                    </tr>
-                }
-            </tbody>
-        </table>
+    <div id="actionButtons" style="display:none;" class="mb-3 text-end">
+        <a href="/Home/ExportToExcel" class="btn btn-success btn-lg shadow">
+            📥 Excel'e Aktar ve Sistemi Temizle
+        </a>
     </div>
-</div>
+
+    <div class="progress mb-4" style="height: 25px;">
+        <div id="scanProgress" class="progress-bar progress-bar-striped progress-bar-animated bg-success" role="progressbar" style="width: 0%;">0%</div>
+    </div>
+
+    <table class="table table-bordered table-striped" id="resultTable" style="display:none;">
+    <thead class="table-dark">
+        <tr>
+            <th>Domain</th>
+            <th>Durum</th>
+        </tr>
+    </thead>
+    <tbody id="resultBody">
+        </tbody>
+</table>
+
+@section Scripts {
+    <script>
+        $(document).ready(function () {
+            let totalSites = parseInt($('#totalCount').text()) || 0;
+            let processedSites = 0;
+            let allResultsHtml = ""; // Tüm satırları burada biriktireceğiz
+
+            function scanNextBatch() {
+                $.post('/Home/ProcessBatch', function (data) {
+                    
+                    if (data.finished) {
+                        $('#scanProgress').removeClass('progress-bar-animated').text('100% Tamamlandı');
+                        
+                        // HTML'i tabloya bas ve görünür yap
+                        $('#resultBody').html(allResultsHtml);
+                        $('#resultTable').fadeIn(1000); 
+                        
+                        // EXCEL BUTONUNU GÖSTER
+                        $('#actionButtons').fadeIn(1000); 
+                        
+                        $('#scanProgress').text('İşlem Tamamlandı!');
+                        return;
+                    }
+
+                    // Gelen 100 siteyi HTML hafızasına ekle (Henüz ekrana basmıyoruz)
+                    data.results.forEach(function (item) {
+                        let statusColor = item.hasAdsTxt ? "text-success fw-bold" : "text-danger";
+                        allResultsHtml += `<tr>
+                                             <td>${item.domain}</td>
+                                             <td class="${statusColor}">${item.statusMessage}</td>
+                                           </tr>`;
+                    });
+
+                    // Sayacı ve İlerleme Çubuğunu Güncelle
+                    processedSites += data.results.length;
+                    $('#processedCount').text(processedSites);
+                    
+                    let percent = Math.round((processedSites / totalSites) * 100);
+                    if(percent > 100) percent = 100;
+                    $('#scanProgress').css('width', percent + '%').text(percent + '%');
+
+                    // Hiç beklemeden bir sonraki 100'lü pakete geç
+                    scanNextBatch();
+                }).fail(function() {
+                    // Render veya internet koparsa baştan denemesi için
+                    setTimeout(scanNextBatch, 3000); 
+                });
+            }
+
+            // Sayfa açılır açılmaz taramayı başlat
+            if(totalSites > 0) {
+                scanNextBatch();
+            }
+        });
+    </script>
+}
